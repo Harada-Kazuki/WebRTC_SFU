@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC_SFU — Viewer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&family=Share+Tech+Mono&display=swap');
+
+  :root {
+    --bg-deep:    #050d1a;
+    --bg-mid:     #0a1628;
+    --bg-card:    #0e1e36;
+    --blue-core:  #0ab4ff;
+    --blue-bright:#41cbff;
+    --blue-dim:   #1a6fa8;
+    --blue-glow:  rgba(10,180,255,0.35);
+    --white:      #e8f4ff;
+    --muted:      #5d84a8;
+    --red:        #ff4e6a;
+    --red-glow:   rgba(255,78,106,0.4);
+    --green:      #00e5a0;
+    --orange:     #ff9f43;
+    --radius-lg:  18px;
+    --radius-md:  12px;
+    --radius-sm:  8px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--white);
+    font-family: 'Nunito', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0 0 60px;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(10,180,255,0.15) 0%, transparent 70%),
+      radial-gradient(ellipse 30% 30% at 90% 90%, rgba(10,180,255,0.06) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+
+  body::after {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: radial-gradient(circle, rgba(10,180,255,0.1) 1px, transparent 1px);
+    background-size: 32px 32px;
+    pointer-events: none; z-index: 0;
+    mask-image: radial-gradient(ellipse 100% 100% at 50% 0%, black 0%, transparent 75%);
+  }
+
+  .container {
+    position: relative; z-index: 1;
+    width: 100%; max-width: 1040px;
+    padding: 0 24px;
+  }
+
+  /* ── ヘッダー ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 28px 0 20px;
+    border-bottom: 1px solid rgba(10,180,255,0.15);
+    margin-bottom: 28px;
+  }
+
+  .logo-area { display: flex; align-items: center; gap: 14px; }
+
+  .logo-icon {
+    width: 48px; height: 48px;
+    background: linear-gradient(135deg, #0077cc, #004488);
+    border-radius: var(--radius-md);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    box-shadow: 0 0 20px var(--blue-glow), inset 0 1px 0 rgba(255,255,255,0.1);
+  }
+
+  .logo-text { line-height: 1.1; }
+  .logo-title {
+    font-size: 1.4em; font-weight: 900; letter-spacing: 1px;
+    color: var(--white); text-shadow: 0 0 20px var(--blue-core);
+  }
+  .logo-title span { color: var(--blue-bright); }
+  .logo-sub {
+    font-size: 0.72em; color: var(--muted);
+    font-family: 'Share Tech Mono', monospace;
+    letter-spacing: 2px; text-transform: uppercase;
+  }
+
+  #status {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 20px; border-radius: 100px;
+    font-size: 0.82em; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; transition: all 0.3s;
+  }
+  #status::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 0 6px currentColor;
+  }
+  .status-waiting    { background: rgba(93,132,168,0.15); color: var(--muted); border: 1px solid rgba(93,132,168,0.3); }
+  .status-connecting { background: rgba(255,159,67,0.12); color: var(--orange); border: 1px solid rgba(255,159,67,0.3); animation: blink 1.2s infinite; }
+  .status-watching   { background: rgba(0,229,160,0.12); color: var(--green); border: 1px solid rgba(0,229,160,0.3); animation: blink 3s infinite; }
+  .status-offline    { background: rgba(255,78,106,0.12); color: var(--red); border: 1px solid rgba(255,78,106,0.3); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.55} }
+
+  /* ── ビデオ ── */
+  .video-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    border: 1.5px solid rgba(10,180,255,0.2);
+    overflow: hidden;
+    margin-bottom: 20px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(10,180,255,0.05);
+    position: relative;
+  }
+  .video-card::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(10,180,255,0.03) 0%, transparent 40%);
+    pointer-events: none; z-index: 1;
+  }
+
+  #remote {
+    width: 100%; display: block;
+    background: #020810;
+    aspect-ratio: 16/9;
+    object-fit: contain;
+  }
+
+  /* オフライン時のオーバーレイ */
+  .offline-overlay {
+    position: absolute; inset: 0; z-index: 3;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 12px;
+    background: rgba(5,13,26,0.85);
+    backdrop-filter: blur(4px);
+    transition: opacity 0.3s;
+  }
+  .offline-overlay.hidden { opacity: 0; pointer-events: none; }
+  .offline-icon { font-size: 3em; filter: grayscale(1) opacity(0.4); }
+  .offline-text {
+    font-size: 0.9em; font-weight: 800; color: var(--muted);
+    letter-spacing: 2px; text-transform: uppercase;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  /* ── コントロール ── */
+  .controls-area {
+    display: flex; gap: 12px; justify-content: center;
+    flex-wrap: wrap; margin-bottom: 20px;
+  }
+
+  .btn {
+    padding: 14px 28px;
+    border-radius: var(--radius-md);
+    font-family: 'Nunito', sans-serif; font-weight: 900; font-size: 0.95em;
+    cursor: pointer; border: none; transition: all 0.18s;
+    position: relative; overflow: hidden;
+  }
+  .btn::after { content: ''; position: absolute; inset: 0; background: rgba(255,255,255,0.1); opacity: 0; transition: opacity 0.15s; }
+  .btn:hover:not(:disabled)::after { opacity: 1; }
+  .btn:hover:not(:disabled) { transform: translateY(-2px); }
+  .btn:active:not(:disabled) { transform: translateY(0); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .btn-watch {
+    background: linear-gradient(135deg, #0ab4ff 0%, #0077cc 100%);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(10,180,255,0.45), inset 0 1px 0 rgba(255,255,255,0.15);
+  }
+  .btn-watch:hover:not(:disabled) { box-shadow: 0 6px 28px rgba(10,180,255,0.6); }
+
+  .btn-disconnect {
+    background: rgba(93,132,168,0.12);
+    color: var(--muted);
+    border: 1.5px solid rgba(93,132,168,0.25);
+  }
+  .btn-disconnect:hover:not(:disabled) { background: rgba(93,132,168,0.22); color: var(--white); border-color: var(--muted); }
+
+  .btn-fullscreen {
+    background: rgba(10,180,255,0.08);
+    color: var(--blue-bright);
+    border: 1.5px solid rgba(10,180,255,0.25);
+  }
+  .btn-fullscreen:hover:not(:disabled) { background: rgba(10,180,255,0.18); border-color: var(--blue-core); }
+
+  /* ── 情報グリッド ── */
+  .info-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    gap: 12px; margin-bottom: 20px; max-width: 500px; margin-left: auto; margin-right: auto;
+  }
+  .info-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-md);
+    border: 1.5px solid rgba(10,180,255,0.12);
+    padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 4px;
+    text-align: center;
+  }
+  .info-card-label {
+    font-size: 0.68em; font-weight: 800; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 2px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .info-card-value {
+    font-size: 1.3em; font-weight: 900; color: var(--blue-bright);
+    font-family: 'Share Tech Mono', monospace;
+    text-shadow: 0 0 12px rgba(65,203,255,0.5);
+  }
+
+  /* ── ログ ── */
+  .log-panel {
+    background: var(--bg-card);
+    border-radius: var(--radius-md);
+    border: 1.5px solid rgba(10,180,255,0.1);
+    overflow: hidden;
+  }
+  .log-header {
+    padding: 12px 20px;
+    background: rgba(10,180,255,0.06);
+    border-bottom: 1px solid rgba(10,180,255,0.1);
+    font-size: 0.72em; font-weight: 800; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 3px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .log-header::before { content: '// '; color: var(--blue-core); }
+  .log-body {
+    padding: 14px 20px; max-height: 200px; overflow-y: auto;
+    font-family: 'Share Tech Mono', monospace; font-size: 11.5px;
+    color: var(--muted); line-height: 1.7;
+  }
+  .log-body::-webkit-scrollbar { width: 4px; }
+  .log-body::-webkit-scrollbar-track { background: transparent; }
+  .log-body::-webkit-scrollbar-thumb { background: rgba(10,180,255,0.2); border-radius: 4px; }
+
+  @media (max-width: 600px) {
+    .header { flex-direction: column; gap: 16px; align-items: flex-start; }
+    .controls-area { gap: 8px; }
+    .btn { padding: 12px 18px; font-size: 0.85em; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div class="logo-area">
+      <div class="logo-icon"></div>
+      <div class="logo-text">
+        <div class="logo-title">WebRTC<span>_SFU</span></div>
+        <div class="logo-sub">Viewer · Server Relay Mode</div>
+      </div>
+    </div>
+    <div id="status" class="status-waiting">待機中</div>
+  </div>
+
+  <div class="video-card">
+    <div class="offline-overlay" id="offlineOverlay">
+      <div class="offline-icon">📡</div>
+      <div class="offline-text">Waiting for broadcast...</div>
+    </div>
+    <video id="remote" autoplay playsinline></video>
+  </div>
+
+  <div class="controls-area">
+    <button class="btn btn-watch" id="watchBtn">▶ Watch</button>
+    <button class="btn btn-disconnect" id="disconnectBtn" disabled>✕ Disconnect</button>
+    <button class="btn btn-fullscreen" id="fullscreenBtn">⛶ Fullscreen</button>
+  </div>
+
+  <div class="info-grid">
+    <div class="info-card">
+      <div class="info-card-label">Latency (RTT)</div>
+      <div class="info-card-value" id="latencyInfo">--</div>
+    </div>
+    <div class="info-card">
+      <div class="info-card-label">Quality</div>
+      <div class="info-card-value" id="qualityInfo">--</div>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-header">System Log</div>
+    <div class="log-body" id="debugLog"></div>
+  </div>
+
+</div>
+
+<script>
+const WS_URL = location.protocol === "https:" ? `wss://${location.host}` : `ws://${location.host}`;
+
+const statusDiv      = document.getElementById("status");
+const videoEl        = document.getElementById("remote");
+const watchBtn       = document.getElementById("watchBtn");
+const disconnectBtn  = document.getElementById("disconnectBtn");
+const fullscreenBtn  = document.getElementById("fullscreenBtn");
+const latencyInfoEl  = document.getElementById("latencyInfo");
+const qualityInfoEl  = document.getElementById("qualityInfo");
+const debugLogEl     = document.getElementById("debugLog");
+const offlineOverlay = document.getElementById("offlineOverlay");
+
+let ws = null, pc = null;
+let viewerId = localStorage.getItem("sfu_viewer_id") || null;
+let isIntentional = false;
+let wsReconnectDelay = 2000, wsReconnectTimer = null;
+let statsTimer = null;
+let pendingCandidates = [];
+
+function log(msg, level = "info") {
+  const colors = { info:"#5d84a8", warn:"#ffa500", error:"#ff4e6a", success:"#41cbff" };
+  const icons  = { info:"›", warn:"⚠", error:"✕", success:"✓" };
+  const time = new Date().toLocaleTimeString();
+  const div = document.createElement("div");
+  div.innerHTML = `<span style="color:#1a6fa8">${time}</span> <span style="color:${colors[level]||colors.info}">${icons[level]||"›"} ${msg}</span>`;
+  debugLogEl.insertBefore(div, debugLogEl.firstChild);
+  while (debugLogEl.children.length > 50) debugLogEl.removeChild(debugLogEl.lastChild);
+}
+
+function setStatus(text, cls) { statusDiv.textContent = text; statusDiv.className = cls; }
+function showOverlay(text) {
+  offlineOverlay.querySelector(".offline-text").textContent = text;
+  offlineOverlay.classList.remove("hidden");
+}
+function hideOverlay() { offlineOverlay.classList.add("hidden"); }
+
+function startStats() {
+  statsTimer = setInterval(async () => {
+    if (!pc) return;
+    try {
+      const stats = await pc.getStats();
+      for (const r of stats.values()) {
+        if (r.type==="inbound-rtp"&&r.mediaType==="video") {
+          qualityInfoEl.textContent = `${r.framesPerSecond||0}fps`;
+        }
+        if (r.type==="candidate-pair"&&r.state==="succeeded"&&r.currentRoundTripTime!==undefined) {
+          latencyInfoEl.textContent = `${Math.round(r.currentRoundTripTime*1000)}ms`;
+        }
+      }
+    } catch(e) {}
+  }, 2000);
+}
+function stopStats() {
+  clearInterval(statsTimer); statsTimer = null;
+  latencyInfoEl.textContent = "--"; qualityInfoEl.textContent = "--";
+}
+
+function connectWs() {
+  return new Promise((resolve, reject) => {
+    if (ws && ws.readyState===WebSocket.OPEN) { resolve(); return; }
+    if (ws) { try { ws.close(); } catch(e) {} ws = null; }
+    setStatus("接続中...", "status-connecting");
+    const t = setTimeout(() => reject(new Error("タイムアウト")), 15000);
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {
+      clearTimeout(t); log("WS接続", "success"); wsReconnectDelay = 2000;
+      ws.send(JSON.stringify({ type:"register", role:"viewer", viewerId }));
+      resolve();
+    };
+    ws.onmessage = handleMessage;
+    ws.onerror = () => { clearTimeout(t); reject(new Error("WS接続エラー")); };
+    ws.onclose = () => { clearTimeout(t); handleWsClose(); };
+  });
+}
+
+function handleWsClose() {
+  log("WS切断");
+  if (isIntentional) return;
+  setStatus("再接続中...", "status-connecting");
+  scheduleReconnect();
+}
+
+function scheduleReconnect() {
+  if (wsReconnectTimer) return;
+  wsReconnectTimer = setTimeout(async () => {
+    wsReconnectTimer = null;
+    if (isIntentional) return;
+    try { await connectWs(); }
+    catch(e) { wsReconnectDelay = Math.min(wsReconnectDelay*1.5, 30000); scheduleReconnect(); }
+  }, wsReconnectDelay);
+}
+
+async function setupPeerConnection() {
+  if (pc) { try { pc.close(); } catch(e) {} pc = null; }
+  pendingCandidates = [];
+  pc = new RTCPeerConnection({ iceServers:[
+    {urls:"stun:stun.l.google.com:19302"},
+    {urls:"stun:stun1.l.google.com:19302"}
+  ]});
+
+  pc.ontrack = ({track, streams}) => {
+    log(`トラック受信: ${track.kind}`, "success");
+    if (track.kind==="video") {
+      videoEl.srcObject = streams[0] || new MediaStream([track]);
+      setStatus("● 視聴中", "status-watching");
+      hideOverlay();
+      startStats();
+    }
+  };
+
+  pc.onicecandidate = ({candidate}) => {
+    if (candidate && ws?.readyState===WebSocket.OPEN)
+      ws.send(JSON.stringify({type:"candidate", candidate}));
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    log(`ICE: ${pc.iceConnectionState}`);
+    if (pc.iceConnectionState==="failed") {
+      log("ICE失敗 - 再接続", "warn");
+      setupPeerConnection().then(() => {
+        ws.send(JSON.stringify({type:"requestOffer", viewerId}));
+      });
+    }
+    if (pc.iceConnectionState==="disconnected") {
+      setStatus("再接続中...", "status-connecting");
+      showOverlay("Reconnecting...");
+    }
+  };
+}
+
+async function handleMessage(e) {
+  let msg; try { msg = JSON.parse(e.data); } catch(e) { return; }
+
+  if (msg.type==="registered"&&msg.role==="viewer") {
+    viewerId = msg.viewerId;
+    localStorage.setItem("sfu_viewer_id", viewerId);
+    log(`視聴者登録完了: ${viewerId.slice(0,8)}...`, "success");
+    await setupPeerConnection();
+  }
+  else if (msg.type==="offer") {
+    if (!pc) await setupPeerConnection();
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+      for (const c of pendingCandidates)
+        try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch(e) {}
+      pendingCandidates = [];
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({type:"answer", answer:pc.localDescription}));
+      log("Answer送信", "success");
+    } catch(e) { log(`Offer処理エラー: ${e.message}`, "error"); }
+  }
+  else if (msg.type==="candidate") {
+    if (pc&&pc.remoteDescription)
+      try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch(e) {}
+    else pendingCandidates.push(msg.candidate);
+  }
+  else if (msg.type==="broadcasterDisconnected") {
+    log("配信者が切断しました", "warn");
+    setStatus("配信者オフライン", "status-offline");
+    videoEl.srcObject = null;
+    showOverlay("Broadcaster offline...");
+    stopStats();
+  }
+}
+
+async function startWatching() {
+  try {
+    isIntentional = false;
+    watchBtn.disabled = true; disconnectBtn.disabled = false;
+    await connectWs();
+    log("視聴開始", "success");
+  } catch(e) {
+    log(`接続エラー: ${e.message}`, "error");
+    setStatus("接続エラー", "status-offline");
+    watchBtn.disabled = false; disconnectBtn.disabled = true;
+  }
+}
+
+function disconnect() {
+  isIntentional = true; stopStats();
+  if (pc) { try { pc.close(); } catch(e) {} pc = null; }
+  if (ws) { try { ws.close(); } catch(e) {} ws = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  videoEl.srcObject = null;
+  showOverlay("Waiting for broadcast...");
+  setStatus("待機中", "status-waiting");
+  watchBtn.disabled = false; disconnectBtn.disabled = true;
+}
+
+fullscreenBtn.onclick = () => {
+  const el = videoEl;
+  if (el.requestFullscreen) el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+};
+
+watchBtn.onclick = startWatching;
+disconnectBtn.onclick = disconnect;
+window.addEventListener("online", () => {
+  if (!isIntentional) connectWs().catch(() => scheduleReconnect());
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState==="visible"&&!isIntentional&&ws?.readyState!==WebSocket.OPEN)
+    connectWs().catch(() => scheduleReconnect());
+});
+
+log("WebRTC_SFU Viewer 起動", "success");
+</script>
+</body>
+</html>

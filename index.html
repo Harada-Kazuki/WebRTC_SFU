@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC_SFU — Broadcaster</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&family=Share+Tech+Mono&display=swap');
+
+  :root {
+    --bg-deep:    #050d1a;
+    --bg-mid:     #0a1628;
+    --bg-card:    #0e1e36;
+    --blue-core:  #0ab4ff;
+    --blue-bright:#41cbff;
+    --blue-dim:   #1a6fa8;
+    --blue-glow:  rgba(10,180,255,0.35);
+    --blue-faint: rgba(10,180,255,0.08);
+    --white:      #e8f4ff;
+    --muted:      #5d84a8;
+    --red:        #ff4e6a;
+    --red-glow:   rgba(255,78,106,0.4);
+    --green:      #00e5a0;
+    --radius-lg:  18px;
+    --radius-md:  12px;
+    --radius-sm:  8px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--white);
+    font-family: 'Nunito', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0 0 60px;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(10,180,255,0.18) 0%, transparent 70%),
+      radial-gradient(ellipse 40% 40% at 10% 80%, rgba(10,180,255,0.07) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+
+  body::after {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: radial-gradient(circle, rgba(10,180,255,0.12) 1px, transparent 1px);
+    background-size: 32px 32px;
+    pointer-events: none; z-index: 0;
+    mask-image: radial-gradient(ellipse 100% 100% at 50% 0%, black 0%, transparent 75%);
+  }
+
+  .container {
+    position: relative; z-index: 1;
+    width: 100%; max-width: 1040px;
+    padding: 0 24px;
+  }
+
+  /* ── ヘッダー ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 28px 0 20px;
+    border-bottom: 1px solid rgba(10,180,255,0.15);
+    margin-bottom: 28px;
+  }
+
+  .logo-area { display: flex; align-items: center; gap: 14px; }
+
+  .logo-icon {
+    width: 48px; height: 48px;
+    background: linear-gradient(135deg, var(--blue-core), #005fa3);
+    border-radius: var(--radius-md);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    box-shadow: 0 0 20px var(--blue-glow), inset 0 1px 0 rgba(255,255,255,0.15);
+  }
+
+  .logo-text { line-height: 1.1; }
+  .logo-title {
+    font-size: 1.4em; font-weight: 900; letter-spacing: 1px;
+    color: var(--white); text-shadow: 0 0 20px var(--blue-core);
+  }
+  .logo-title span { color: var(--blue-bright); }
+  .logo-sub {
+    font-size: 0.72em; color: var(--muted);
+    font-family: 'Share Tech Mono', monospace;
+    letter-spacing: 2px; text-transform: uppercase;
+  }
+
+  #status {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 20px;
+    border-radius: 100px;
+    font-size: 0.82em; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; transition: all 0.3s;
+  }
+  #status::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 0 6px currentColor;
+  }
+  .status-disconnected { background: rgba(93,132,168,0.15); color: var(--muted); border: 1px solid rgba(93,132,168,0.3); }
+  .status-connecting   { background: rgba(255,159,67,0.12); color: #ff9f43; border: 1px solid rgba(255,159,67,0.3); animation: blink 1.2s infinite; }
+  .status-streaming    { background: rgba(255,78,106,0.15); color: var(--red); border: 1px solid rgba(255,78,106,0.4); animation: blink 2s infinite; }
+  .status-connected    { background: rgba(0,229,160,0.12); color: var(--green); border: 1px solid rgba(0,229,160,0.3); }
+  .status-error        { background: rgba(255,78,106,0.15); color: var(--red); border: 1px solid rgba(255,78,106,0.4); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.55} }
+
+  /* ── ビデオ ── */
+  .video-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    border: 1.5px solid rgba(10,180,255,0.2);
+    overflow: hidden;
+    margin-bottom: 20px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(10,180,255,0.05);
+    position: relative;
+  }
+  .video-card::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(10,180,255,0.04) 0%, transparent 40%);
+    pointer-events: none; z-index: 1;
+  }
+
+  #local {
+    width: 100%; display: block;
+    background: #020810;
+    aspect-ratio: 16/9;
+    object-fit: contain;
+  }
+
+  .live-badge {
+    position: absolute; top: 14px; left: 14px; z-index: 2;
+    background: var(--red); color: #fff;
+    font-size: 0.72em; font-weight: 900; letter-spacing: 2px;
+    padding: 4px 12px; border-radius: 100px;
+    box-shadow: 0 0 16px var(--red-glow); display: none;
+  }
+  .live-badge.active { display: block; animation: blink 2s infinite; }
+
+  /* ── コントロール ── */
+  .controls-area {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  .camera-panel {
+    background: var(--bg-card);
+    border-radius: var(--radius-md);
+    border: 1.5px solid rgba(10,180,255,0.15);
+    padding: 16px 20px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .camera-label {
+    font-size: 0.72em; font-weight: 800; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 2px; white-space: nowrap;
+  }
+
+  select {
+    flex: 1; min-width: 220px;
+    font-family: 'Nunito', sans-serif; font-size: 0.88em; font-weight: 700;
+    background: rgba(10,180,255,0.06); color: var(--white);
+    border: 1.5px solid rgba(10,180,255,0.25);
+    border-radius: var(--radius-sm);
+    padding: 10px 36px 10px 14px;
+    cursor: pointer; outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%230ab4ff' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 12px center;
+  }
+  select option { background: var(--bg-mid); color: var(--white); }
+  select:hover, select:focus { border-color: var(--blue-core); box-shadow: 0 0 0 3px rgba(10,180,255,0.15); }
+
+  .btn-refresh {
+    padding: 10px 16px;
+    background: rgba(10,180,255,0.08);
+    border: 1.5px solid rgba(10,180,255,0.25);
+    border-radius: var(--radius-sm);
+    color: var(--blue-bright);
+    font-family: 'Nunito', sans-serif; font-weight: 800; font-size: 1em;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .btn-refresh:hover { background: rgba(10,180,255,0.18); border-color: var(--blue-core); transform: rotate(90deg); }
+
+  .action-buttons { display: flex; flex-direction: column; gap: 10px; }
+
+  .btn {
+    padding: 14px 28px;
+    border-radius: var(--radius-md);
+    font-family: 'Nunito', sans-serif; font-weight: 900; font-size: 0.95em;
+    cursor: pointer; border: none; transition: all 0.18s;
+    position: relative; overflow: hidden; white-space: nowrap;
+  }
+  .btn::after { content: ''; position: absolute; inset: 0; background: rgba(255,255,255,0.1); opacity: 0; transition: opacity 0.15s; }
+  .btn:hover:not(:disabled)::after { opacity: 1; }
+  .btn:hover:not(:disabled) { transform: translateY(-2px); }
+  .btn:active:not(:disabled) { transform: translateY(0); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .btn-start {
+    background: linear-gradient(135deg, #0ab4ff 0%, #0077cc 100%);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(10,180,255,0.45), inset 0 1px 0 rgba(255,255,255,0.15);
+  }
+  .btn-start:hover:not(:disabled) { box-shadow: 0 6px 28px rgba(10,180,255,0.6); }
+
+  .btn-stop {
+    background: linear-gradient(135deg, #ff4e6a 0%, #cc2244 100%);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(255,78,106,0.4), inset 0 1px 0 rgba(255,255,255,0.15);
+  }
+  .btn-stop:hover:not(:disabled) { box-shadow: 0 6px 28px rgba(255,78,106,0.55); }
+
+  /* ── 情報グリッド ── */
+  .info-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 12px; margin-bottom: 20px;
+  }
+  .info-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-md);
+    border: 1.5px solid rgba(10,180,255,0.12);
+    padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .info-card-label {
+    font-size: 0.68em; font-weight: 800; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 2px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .info-card-value {
+    font-size: 1.3em; font-weight: 900; color: var(--blue-bright);
+    font-family: 'Share Tech Mono', monospace;
+    text-shadow: 0 0 12px rgba(65,203,255,0.5);
+  }
+
+  /* ── ログ ── */
+  .log-panel {
+    background: var(--bg-card);
+    border-radius: var(--radius-md);
+    border: 1.5px solid rgba(10,180,255,0.1);
+    overflow: hidden;
+  }
+  .log-header {
+    padding: 12px 20px;
+    background: rgba(10,180,255,0.06);
+    border-bottom: 1px solid rgba(10,180,255,0.1);
+    font-size: 0.72em; font-weight: 800; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 3px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .log-header::before { content: '// '; color: var(--blue-core); }
+  .log-body {
+    padding: 14px 20px; max-height: 240px; overflow-y: auto;
+    font-family: 'Share Tech Mono', monospace; font-size: 11.5px;
+    color: var(--muted); line-height: 1.7;
+  }
+  .log-body::-webkit-scrollbar { width: 4px; }
+  .log-body::-webkit-scrollbar-track { background: transparent; }
+  .log-body::-webkit-scrollbar-thumb { background: rgba(10,180,255,0.2); border-radius: 4px; }
+
+  @media (max-width: 680px) {
+    .controls-area { grid-template-columns: 1fr; }
+    .action-buttons { flex-direction: row; }
+    .info-grid { grid-template-columns: 1fr 1fr; }
+    .header { flex-direction: column; gap: 16px; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div class="logo-area">
+      <div class="logo-icon"></div>
+      <div class="logo-text">
+        <div class="logo-title">WebRTC<span>_SFU</span></div>
+        <div class="logo-sub">Broadcaster · Server Relay Mode</div>
+      </div>
+    </div>
+    <div id="status" class="status-disconnected">Offline</div>
+  </div>
+
+  <div class="video-card">
+    <div class="live-badge" id="liveBadge">● LIVE</div>
+    <video id="local" autoplay playsinline muted></video>
+  </div>
+
+  <div class="controls-area">
+    <div class="camera-panel">
+      <span class="camera-label">📷 Camera</span>
+      <select id="cameraSelect"><option value="">-- デバイスを選択 --</option></select>
+      <button class="btn-refresh" id="refreshBtn" title="更新">↺</button>
+    </div>
+    <div class="action-buttons">
+      <button class="btn btn-start" id="startBtn">▶ Start Broadcast</button>
+      <button class="btn btn-stop" id="stopBtn" disabled>■ Stop</button>
+    </div>
+  </div>
+
+  <div class="info-grid">
+    <div class="info-card">
+      <div class="info-card-label">Viewers</div>
+      <div class="info-card-value" id="viewerCount">0</div>
+    </div>
+    <div class="info-card">
+      <div class="info-card-label">Quality</div>
+      <div class="info-card-value" id="qualityInfo">--</div>
+    </div>
+    <div class="info-card">
+      <div class="info-card-label">Uptime</div>
+      <div class="info-card-value" id="uptimeInfo">--:--:--</div>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-header">System Log</div>
+    <div class="log-body" id="debugLog"></div>
+  </div>
+
+</div>
+
+<script>
+const WS_URL = location.protocol === "https:" ? `wss://${location.host}` : `ws://${location.host}`;
+
+const statusDiv     = document.getElementById("status");
+const startBtn      = document.getElementById("startBtn");
+const stopBtn       = document.getElementById("stopBtn");
+const refreshBtn    = document.getElementById("refreshBtn");
+const videoEl       = document.getElementById("local");
+const cameraSelect  = document.getElementById("cameraSelect");
+const debugLogEl    = document.getElementById("debugLog");
+const viewerCountEl = document.getElementById("viewerCount");
+const qualityInfoEl = document.getElementById("qualityInfo");
+const uptimeInfoEl  = document.getElementById("uptimeInfo");
+const liveBadge     = document.getElementById("liveBadge");
+
+let ws = null, pc = null, localStream = null;
+let isIntentional = false;
+let wsReconnectTimer = null, wsReconnectDelay = 2000;
+let uptimeTimer = null, startTime = null, statsTimer = null;
+
+function log(msg, level = "info") {
+  const colors = { info:"#5d84a8", warn:"#ffa500", error:"#ff4e6a", success:"#41cbff" };
+  const icons  = { info:"›", warn:"⚠", error:"✕", success:"✓" };
+  const time = new Date().toLocaleTimeString();
+  const div = document.createElement("div");
+  div.innerHTML = `<span style="color:#1a6fa8">${time}</span> <span style="color:${colors[level]||colors.info}">${icons[level]||"›"} ${msg}</span>`;
+  debugLogEl.insertBefore(div, debugLogEl.firstChild);
+  while (debugLogEl.children.length > 60) debugLogEl.removeChild(debugLogEl.lastChild);
+}
+
+function setStatus(text, cls) { statusDiv.textContent = text; statusDiv.className = cls; }
+
+async function populateCameras() {
+  try {
+    let tmp = null;
+    try { tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); } catch(e) {}
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const vd = devices.filter(d => d.kind === "videoinput");
+    if (tmp) tmp.getTracks().forEach(t => t.stop());
+    cameraSelect.innerHTML = '<option value="">-- デバイスを選択 --</option>';
+    vd.forEach((d, i) => {
+      const opt = document.createElement("option");
+      opt.value = d.deviceId;
+      const label = d.label || `Camera ${i+1}`;
+      opt.textContent = label;
+      if (label.toLowerCase().includes("obs") || label.toLowerCase().includes("virtual")) opt.selected = true;
+      cameraSelect.appendChild(opt);
+    });
+    log(`カメラ検出: ${vd.length}台`, "success");
+  } catch(e) { log(`カメラ列挙エラー: ${e.message}`, "error"); }
+}
+
+function startUptime() {
+  startTime = Date.now();
+  uptimeTimer = setInterval(() => {
+    const d = Date.now() - startTime;
+    const h = String(Math.floor(d/3600000)).padStart(2,"0");
+    const m = String(Math.floor((d%3600000)/60000)).padStart(2,"0");
+    const s = String(Math.floor((d%60000)/1000)).padStart(2,"0");
+    uptimeInfoEl.textContent = `${h}:${m}:${s}`;
+  }, 1000);
+}
+function stopUptime() { clearInterval(uptimeTimer); uptimeTimer = null; uptimeInfoEl.textContent = "--:--:--"; }
+
+function startStats() {
+  statsTimer = setInterval(async () => {
+    if (!pc) return;
+    try {
+      const stats = await pc.getStats();
+      for (const r of stats.values()) {
+        if (r.type === "outbound-rtp" && r.mediaType === "video") {
+          qualityInfoEl.textContent = `${r.framesPerSecond||0}fps`;
+        }
+      }
+    } catch(e) {}
+  }, 2000);
+}
+function stopStats() { clearInterval(statsTimer); statsTimer = null; }
+
+function connectWs() {
+  return new Promise((resolve, reject) => {
+    if (ws && ws.readyState === WebSocket.OPEN) { resolve(); return; }
+    if (ws) { try { ws.close(); } catch(e) {} ws = null; }
+    setStatus("接続中...", "status-connecting");
+    const t = setTimeout(() => reject(new Error("接続タイムアウト")), 15000);
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {
+      clearTimeout(t); log("WS接続成功", "success"); wsReconnectDelay = 2000;
+      ws.send(JSON.stringify({ type: "register", role: "broadcaster" }));
+      resolve();
+    };
+    ws.onmessage = handleMessage;
+    ws.onerror = () => { clearTimeout(t); reject(new Error("WS接続エラー")); };
+    ws.onclose = () => { clearTimeout(t); handleWsClose(); };
+  });
+}
+
+function handleWsClose() {
+  log("WS切断");
+  if (isIntentional) { setStatus("Offline", "status-disconnected"); return; }
+  if (localStream) { setStatus("再接続中...", "status-connecting"); scheduleReconnect(); }
+}
+
+function scheduleReconnect() {
+  if (wsReconnectTimer) return;
+  wsReconnectTimer = setTimeout(async () => {
+    wsReconnectTimer = null;
+    if (isIntentional || !localStream) return;
+    try { await connectWs(); wsReconnectDelay = 2000; await setupPeerConnection(); }
+    catch(e) { wsReconnectDelay = Math.min(wsReconnectDelay*1.5, 30000); scheduleReconnect(); }
+  }, wsReconnectDelay);
+}
+
+async function setupPeerConnection() {
+  if (!localStream) return;
+  if (pc) { try { pc.close(); } catch(e) {} pc = null; }
+  pc = new RTCPeerConnection({ iceServers:[
+    {urls:"stun:stun.l.google.com:19302"},
+    {urls:"stun:stun1.l.google.com:19302"}
+  ]});
+  for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+  pc.onicecandidate = ({candidate}) => {
+    if (candidate && ws?.readyState===WebSocket.OPEN)
+      ws.send(JSON.stringify({type:"candidate", candidate}));
+  };
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState==="connected"||pc.iceConnectionState==="completed") {
+      setStatus("● LIVE", "status-streaming");
+      liveBadge.classList.add("active");
+      log("配信開始！", "success");
+      startStats();
+    } else if (pc.iceConnectionState==="failed") {
+      log("ICE失敗 - 再接続", "warn"); setupPeerConnection();
+    }
+  };
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({type:"offer", offer:pc.localDescription}));
+    log("Offer送信", "success");
+  } catch(e) { log(`Offer作成エラー: ${e.message}`, "error"); }
+}
+
+async function handleMessage(e) {
+  let msg; try { msg = JSON.parse(e.data); } catch(e) { return; }
+  if (msg.type==="registered"&&msg.role==="broadcaster") {
+    log(`配信者登録完了 (視聴者: ${msg.viewerCount}人)`, "success");
+    viewerCountEl.textContent = msg.viewerCount;
+    await setupPeerConnection();
+  }
+  else if (msg.type==="answer") {
+    if (pc&&pc.signalingState!=="stable")
+      try { await pc.setRemoteDescription(new RTCSessionDescription(msg.answer)); log("Answer受信","success"); }
+      catch(e) { log(`Answer設定エラー: ${e.message}`,"error"); }
+  }
+  else if (msg.type==="candidate") {
+    if (pc&&pc.remoteDescription)
+      try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch(e) {}
+  }
+  else if (msg.type==="viewerCount") { viewerCountEl.textContent = msg.count; }
+}
+
+async function startBroadcast() {
+  try {
+    log("配信開始処理");
+    setStatus("カメラ起動中...", "status-connecting");
+    const deviceId = cameraSelect.value;
+    const vc = {width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}};
+    if (deviceId) vc.deviceId = {exact:deviceId};
+    localStream = await navigator.mediaDevices.getUserMedia({video:vc, audio:false});
+    log("カメラ取得成功", "success");
+    videoEl.srcObject = localStream;
+    await connectWs();
+    startBtn.disabled = true; stopBtn.disabled = false;
+    startUptime();
+  } catch(e) {
+    log(`配信開始エラー: ${e.message}`, "error");
+    setStatus("Error", "status-error");
+    alert(`エラー: ${e.message}\n\nOBSの仮想カメラがONか確認してください。`);
+    localStream = null;
+  }
+}
+
+function stopBroadcast() {
+  isIntentional = true; log("配信停止");
+  stopStats(); stopUptime();
+  liveBadge.classList.remove("active");
+  if (pc) { try { pc.close(); } catch(e) {} pc = null; }
+  if (localStream) { localStream.getTracks().forEach(t=>t.stop()); localStream = null; }
+  videoEl.srcObject = null;
+  if (ws) { try { ws.close(); } catch(e) {} ws = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  setStatus("Offline", "status-disconnected");
+  qualityInfoEl.textContent = "--"; viewerCountEl.textContent = "0";
+  startBtn.disabled = false; stopBtn.disabled = true;
+  setTimeout(() => { isIntentional = false; wsReconnectDelay = 2000; }, 1000);
+}
+
+startBtn.onclick = startBroadcast;
+stopBtn.onclick = stopBroadcast;
+refreshBtn.onclick = populateCameras;
+window.addEventListener("beforeunload", () => { isIntentional = true; });
+window.addEventListener("online", () => {
+  if (localStream && !isIntentional) connectWs().catch(() => scheduleReconnect());
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState==="visible"&&localStream&&(!ws||ws.readyState!==WebSocket.OPEN)&&!isIntentional)
+    connectWs().catch(()=>scheduleReconnect());
+});
+
+log("WebRTC_SFU Broadcaster 起動", "success");
+populateCameras();
+connectWs().catch(e => log(`初期WS接続エラー: ${e.message}`, "warn"));
+</script>
+</body>
+</html>

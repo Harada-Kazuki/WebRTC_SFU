@@ -1,0 +1,14 @@
+{
+  "name": "WebRTC_SFU",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node --expose-gc server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0",
+    "@roamhq/wrtc": "^0.8.0"
+  }
+}
