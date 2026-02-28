@@ -7,57 +7,48 @@ import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
 import wrtc from "@roamhq/wrtc";
 
-const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, nonstandard } = wrtc;
-const { RTCVideoSink, RTCAudioSink } = nonstandard;
+const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = wrtc;
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname  = path.dirname(__filename);
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({
-  server,
-  perMessageDeflate: false,
-  maxPayload: 10 * 1024 * 1024
-});
+const wss    = new WebSocketServer({ server, perMessageDeflate: false, maxPayload: 10 * 1024 * 1024 });
 
 app.use(express.static(path.join(__dirname, "public")));
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
-app.get("/health", (req, res) => res.json({
+app.get("/",       (_, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.get("/health", (_, res) => res.json({
   uptime: process.uptime(),
   broadcaster: broadcasterPeer ? "connected" : "disconnected",
   viewers: viewerPeers.size,
   memory: process.memoryUsage()
 }));
-app.get("/ping", (req, res) => res.send("pong"));
+app.get("/ping", (_, res) => res.send("pong"));
 
-// ─── 状態管理 ────────────────────────────────────────────────
-// 配信者側PeerConnection（サーバーが受信側）
-let broadcasterPeer = null;       // { ws, pc, videoTrack, audioTrack, sinks }
-let broadcasterWs = null;
+// ─── 状態管理 ─────────────────────────────────────────────────
+let broadcasterPeer = null;  // { ws, pc, videoTrack }
+let broadcasterWs   = null;
 
-// 視聴者側PeerConnection（サーバーが送信側）Map<viewerId, { ws, pc }>
-const viewerPeers = new Map();
-
-// 蓄積されたICE候補（PC準備前に届いた分）
-const pendingCandidates = new Map(); // viewerId → []
+const viewerPeers      = new Map(); // viewerId → { ws, pc }
+const pendingCandidates = new Map(); // viewerId → RTCIceCandidate[]
 
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
 ];
 
-const PING_INTERVAL = 20000;
+const PING_INTERVAL       = 20000;
 const BROADCASTER_TIMEOUT = 30000;
 let broadcasterTimeoutTimer = null;
 
-// ─── ログ ─────────────────────────────────────────────────────
+// ─── ログ ──────────────────────────────────────────────────────
 function log(msg, level = "info") {
-  const prefix = { info: "ℹ️", warn: "⚠️", error: "❌", success: "✅" }[level] || "ℹ️";
-  console.log(`[${new Date().toISOString()}] ${prefix} ${msg}`);
+  const p = { info: "ℹ️", warn: "⚠️", error: "❌", success: "✅" }[level] || "ℹ️";
+  console.log(`[${new Date().toISOString()}] ${p} ${msg}`);
 }
 
-// ─── WebSocket送信ヘルパー ────────────────────────────────────
+// ─── WebSocket 送信ヘルパー ─────────────────────────────────────
 function safeSend(ws, data) {
   if (ws && ws.readyState === 1) {
     try { ws.send(JSON.stringify(data)); return true; }
@@ -66,52 +57,42 @@ function safeSend(ws, data) {
   return false;
 }
 
-// ─── 配信者からのトラックを全視聴者に転送 ─────────────────────
-function forwardTrackToViewer(viewerId, track) {
-  const peer = viewerPeers.get(viewerId);
-  if (!peer || !peer.pc) return;
-
-  const senders = peer.pc.getSenders();
-  const existing = senders.find(s => s.track && s.track.kind === track.kind);
-
-  if (existing) {
-    existing.replaceTrack(track).catch(e =>
-      log(`replaceTrack error [${viewerId}]: ${e.message}`, "error")
-    );
-  } else {
-    peer.pc.addTrack(track);
-  }
+// ─── 視聴者数を配信者に通知 ────────────────────────────────────
+function notifyViewerCount() {
+  safeSend(broadcasterWs, { type: "viewerCount", count: viewerPeers.size });
 }
 
-// ─── 視聴者PeerConnection作成・Offer送信 ─────────────────────
-async function createViewerPeer(viewerId, ws) {
-  // 既存があればクリーンアップ
-  cleanupViewer(viewerId);
+// ─── 全視聴者に通知 ────────────────────────────────────────────
+function notifyAllViewers(data) {
+  for (const [, peer] of viewerPeers) safeSend(peer.ws, data);
+}
 
+// ─── 視聴者 PeerConnection を作成して Offer 送信 ───────────────
+async function createViewerPeer(viewerId, ws) {
+  cleanupViewer(viewerId);
   log(`Creating viewer peer: ${viewerId}`);
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
   viewerPeers.set(viewerId, { ws, pc });
 
   // 配信者のトラックが既にあれば追加
+  // ※ addTrack でなく addTransceiver(track) を使って方向を明示
   if (broadcasterPeer?.videoTrack) {
-    pc.addTrack(broadcasterPeer.videoTrack);
+    pc.addTransceiver(broadcasterPeer.videoTrack, { direction: "sendonly" });
     log(`Added existing video track to viewer ${viewerId}`);
+  } else {
+    // トラックがまだ来ていない場合もsendonly transceiver を予約して
+    // 後から replaceTrack で差し込む
+    pc.addTransceiver("video", { direction: "sendonly" });
   }
 
   pc.onicecandidate = ({ candidate }) => {
-    if (candidate) {
-      safeSend(ws, { type: "candidate", candidate });
-    }
+    if (candidate) safeSend(ws, { type: "candidate", candidate });
   };
 
   pc.oniceconnectionstatechange = () => {
     log(`Viewer ${viewerId} ICE: ${pc.iceConnectionState}`);
-    if (pc.iceConnectionState === "failed") {
-      log(`ICE failed for viewer ${viewerId}, restarting`, "warn");
-      restartViewerIce(viewerId);
-    }
+    if (pc.iceConnectionState === "failed") restartViewerIce(viewerId);
   };
 
   pc.onconnectionstatechange = () => {
@@ -121,10 +102,17 @@ async function createViewerPeer(viewerId, ws) {
     }
   };
 
+  await sendOfferToViewer(viewerId);
+}
+
+// ─── Offer を視聴者へ送る ──────────────────────────────────────
+async function sendOfferToViewer(viewerId) {
+  const peer = viewerPeers.get(viewerId);
+  if (!peer) return;
   try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    safeSend(ws, { type: "offer", offer: pc.localDescription });
+    const offer = await peer.pc.createOffer();
+    await peer.pc.setLocalDescription(offer);
+    safeSend(peer.ws, { type: "offer", offer: peer.pc.localDescription });
     log(`Offer sent to viewer ${viewerId}`, "success");
   } catch (e) {
     log(`createOffer error [${viewerId}]: ${e.message}`, "error");
@@ -132,7 +120,7 @@ async function createViewerPeer(viewerId, ws) {
   }
 }
 
-// ─── ICE Restart ─────────────────────────────────────────────
+// ─── ICE Restart ───────────────────────────────────────────────
 async function restartViewerIce(viewerId) {
   const peer = viewerPeers.get(viewerId);
   if (!peer) return;
@@ -146,15 +134,7 @@ async function restartViewerIce(viewerId) {
   }
 }
 
-// ─── 視聴者数通知 ────────────────────────────────────────────
-function broadcastViewerCount() {
-  const count = viewerPeers.size;
-  if (broadcasterWs && broadcasterWs.readyState === 1) {
-    try { broadcasterWs.send(JSON.stringify({ type: "viewerCount", count })); } catch(e) {}
-  }
-}
-
-// ─── 視聴者クリーンアップ ─────────────────────────────────────
+// ─── 視聴者クリーンアップ ──────────────────────────────────────
 function cleanupViewer(viewerId) {
   const peer = viewerPeers.get(viewerId);
   if (!peer) return;
@@ -162,154 +142,106 @@ function cleanupViewer(viewerId) {
   viewerPeers.delete(viewerId);
   pendingCandidates.delete(viewerId);
   log(`Viewer ${viewerId} cleaned up (remaining: ${viewerPeers.size})`);
-  broadcastViewerCount();
+  notifyViewerCount();
 }
 
-// ─── 配信者クリーンアップ ─────────────────────────────────────
+// ─── 配信者クリーンアップ ──────────────────────────────────────
 function cleanupBroadcaster() {
   if (!broadcasterPeer) return;
-
-  // sinkを停止
-  if (broadcasterPeer.sinks) {
-    for (const sink of broadcasterPeer.sinks) {
-      try { sink.stop(); } catch (e) {}
-    }
-  }
   try { broadcasterPeer.pc.close(); } catch (e) {}
-
   broadcasterPeer = null;
-  broadcasterWs = null;
+  broadcasterWs   = null;
   log("Broadcaster cleaned up", "warn");
 }
 
-// ─── 配信者PeerConnection作成（サーバーが受信） ───────────────
+// ─── 配信者 PC を作成（サーバーが受信側） ──────────────────────
 async function createBroadcasterPeer(ws) {
   cleanupBroadcaster();
-
   log("Creating broadcaster peer (server-side receiver)");
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  broadcasterPeer = { ws, pc, videoTrack: null };
+  broadcasterWs   = ws;
 
-  // トラック受信時の処理
-  pc.ontrack = ({ track, streams }) => {
+  // ★ ここが重要: recvonly transceiver を追加することで
+  //    ブラウザからの Offer に video m-line が含まれ ontrack が発火する
+  pc.addTransceiver("video", { direction: "recvonly" });
+
+  pc.ontrack = ({ track }) => {
     log(`Broadcaster track received: ${track.kind}`, "success");
+    if (track.kind !== "video") return;
 
-    if (track.kind === "video") {
-      broadcasterPeer.videoTrack = track;
+    broadcasterPeer.videoTrack = track;
 
-      // 既存の全視聴者に転送
-      for (const [viewerId] of viewerPeers) {
-        forwardTrackToViewer(viewerId, track);
-        renegotiateWithViewer(viewerId);
+    // 既存の全視聴者のトランシーバーにトラックを差し込む
+    for (const [viewerId, peer] of viewerPeers) {
+      const senders = peer.pc.getSenders();
+      const sender  = senders.find(s => s.track === null || (s.track && s.track.kind === "video"));
+      if (sender) {
+        sender.replaceTrack(track).then(() => {
+          log(`Track forwarded to viewer ${viewerId}`, "success");
+          // replaceTrack後は再ネゴシエーション不要（同一 transceiver で更新）
+        }).catch(e => log(`replaceTrack error [${viewerId}]: ${e.message}`, "error"));
       }
-
-      track.onended = () => {
-        log("Broadcaster video track ended", "warn");
-        broadcasterPeer && (broadcasterPeer.videoTrack = null);
-      };
     }
+
+    track.onended = () => {
+      log("Broadcaster video track ended", "warn");
+      if (broadcasterPeer) broadcasterPeer.videoTrack = null;
+    };
   };
 
   pc.onicecandidate = ({ candidate }) => {
     if (candidate) safeSend(ws, { type: "candidate", candidate });
   };
 
-  pc.oniceconnectionstatechange = () => {
-    log(`Broadcaster ICE: ${pc.iceConnectionState}`);
-  };
-
+  pc.oniceconnectionstatechange = () => log(`Broadcaster ICE: ${pc.iceConnectionState}`);
   pc.onconnectionstatechange = () => {
     log(`Broadcaster conn: ${pc.connectionState}`);
     if (pc.connectionState === "failed") {
-      log("Broadcaster connection failed", "error");
       notifyAllViewers({ type: "broadcasterDisconnected", permanent: false });
     }
   };
-
-  broadcasterPeer = { ws, pc, videoTrack: null, sinks: [] };
-  broadcasterWs = ws;
-
-  return pc;
 }
 
-// ─── 視聴者との再ネゴシエーション ────────────────────────────
-async function renegotiateWithViewer(viewerId) {
-  const peer = viewerPeers.get(viewerId);
-  if (!peer) return;
-
-  try {
-    const offer = await peer.pc.createOffer();
-    await peer.pc.setLocalDescription(offer);
-    safeSend(peer.ws, { type: "offer", offer: peer.pc.localDescription });
-    log(`Renegotiation offer sent to ${viewerId}`);
-  } catch (e) {
-    log(`Renegotiation error [${viewerId}]: ${e.message}`, "error");
-  }
-}
-
-// ─── 全視聴者に通知 ──────────────────────────────────────────
-function notifyAllViewers(data) {
-  for (const [, peer] of viewerPeers) {
-    safeSend(peer.ws, data);
-  }
-}
-
-// ─── WebSocket接続処理 ────────────────────────────────────────
+// ─── WebSocket 接続処理 ────────────────────────────────────────
 wss.on("connection", (ws, req) => {
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
   log(`New WS connection from ${ip}`);
 
-  let role = null;
+  let role     = null;
   let viewerId = null;
-  let pingTimer = null;
-
-  // Ping/Pong keepalive
-  pingTimer = setInterval(() => {
-    if (ws.readyState === 1) ws.ping();
-    else clearInterval(pingTimer);
+  const pingTimer = setInterval(() => {
+    if (ws.readyState === 1) ws.ping(); else clearInterval(pingTimer);
   }, PING_INTERVAL);
 
   ws.on("message", async (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); }
-    catch (e) { return; }
+    try { msg = JSON.parse(raw); } catch (e) { return; }
 
-    // ── 配信者登録 ──────────────────────────────────────────
+    // ── 配信者登録 ────────────────────────────────────────────
     if (msg.type === "register" && msg.role === "broadcaster") {
       role = "broadcaster";
-
-      if (broadcasterTimeoutTimer) {
-        clearTimeout(broadcasterTimeoutTimer);
-        broadcasterTimeoutTimer = null;
-      }
-
+      if (broadcasterTimeoutTimer) { clearTimeout(broadcasterTimeoutTimer); broadcasterTimeoutTimer = null; }
       log("Broadcaster registering...");
-      const pc = await createBroadcasterPeer(ws);
-
-      // 視聴者からのofferを受け付ける準備が整ったことを通知
+      await createBroadcasterPeer(ws);
       safeSend(ws, { type: "registered", role: "broadcaster", viewerCount: viewerPeers.size });
       return;
     }
 
-    // ── 視聴者登録 ──────────────────────────────────────────
+    // ── 視聴者登録 ────────────────────────────────────────────
     if (msg.type === "register" && msg.role === "viewer") {
-      role = "viewer";
+      role     = "viewer";
       viewerId = msg.viewerId || randomUUID();
-
       log(`Viewer registering: ${viewerId}`);
       await createViewerPeer(viewerId, ws);
-
       safeSend(ws, { type: "registered", role: "viewer", viewerId });
-      broadcastViewerCount();
-
-      // 配信者がいなければ通知
-      if (!broadcasterPeer) {
-        safeSend(ws, { type: "broadcasterDisconnected", permanent: false });
-      }
+      notifyViewerCount();
+      if (!broadcasterPeer) safeSend(ws, { type: "broadcasterDisconnected", permanent: false });
       return;
     }
 
-    // ── 配信者 → サーバー: Offer ────────────────────────────
+    // ── 配信者 → サーバー: Offer ──────────────────────────────
     if (msg.type === "offer" && role === "broadcaster") {
       if (!broadcasterPeer) return;
       const pc = broadcasterPeer.pc;
@@ -325,7 +257,7 @@ wss.on("connection", (ws, req) => {
       return;
     }
 
-    // ── 視聴者 → サーバー: Answer ───────────────────────────
+    // ── 視聴者 → サーバー: Answer ─────────────────────────────
     if (msg.type === "answer" && role === "viewer") {
       const peer = viewerPeers.get(viewerId);
       if (!peer) return;
@@ -333,32 +265,37 @@ wss.on("connection", (ws, req) => {
         await peer.pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
         log(`Viewer ${viewerId} answer set`, "success");
 
-        // 蓄積されていたICE候補を適用
+        // 蓄積 ICE 候補を適用
         const pending = pendingCandidates.get(viewerId) || [];
         for (const c of pending) {
-          try { await peer.pc.addIceCandidate(new RTCIceCandidate(c)); }
-          catch (e) {}
+          try { await peer.pc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {}
         }
         pendingCandidates.delete(viewerId);
+
+        // answer 受理後にトラックがあれば replaceTrack で差し込む
+        if (broadcasterPeer?.videoTrack) {
+          const sender = peer.pc.getSenders().find(s => s.track === null || (s.track && s.track.kind === "video"));
+          if (sender) {
+            sender.replaceTrack(broadcasterPeer.videoTrack)
+              .then(() => log(`Late track forwarded to viewer ${viewerId}`, "success"))
+              .catch(e => log(`Late replaceTrack error: ${e.message}`, "error"));
+          }
+        }
       } catch (e) {
         log(`Viewer answer error [${viewerId}]: ${e.message}`, "error");
       }
       return;
     }
 
-    // ── ICE候補 ─────────────────────────────────────────────
+    // ── ICE 候補 ──────────────────────────────────────────────
     if (msg.type === "candidate") {
       if (role === "broadcaster" && broadcasterPeer) {
-        try {
-          await broadcasterPeer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-        } catch (e) {}
+        try { await broadcasterPeer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
       } else if (role === "viewer" && viewerId) {
         const peer = viewerPeers.get(viewerId);
-        if (peer && peer.pc.remoteDescription) {
-          try { await peer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); }
-          catch (e) {}
+        if (peer?.pc.remoteDescription) {
+          try { await peer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
         } else {
-          // Remote Descriptionがまだなければ蓄積
           if (!pendingCandidates.has(viewerId)) pendingCandidates.set(viewerId, []);
           pendingCandidates.get(viewerId).push(msg.candidate);
         }
@@ -373,13 +310,10 @@ wss.on("connection", (ws, req) => {
 
     if (role === "broadcaster") {
       cleanupBroadcaster();
-
-      // 一定時間待って視聴者に通知
       broadcasterTimeoutTimer = setTimeout(() => {
         log("Broadcaster timeout - notifying viewers", "warn");
         notifyAllViewers({ type: "broadcasterDisconnected", permanent: false });
       }, BROADCASTER_TIMEOUT);
-
     } else if (role === "viewer" && viewerId) {
       cleanupViewer(viewerId);
     }
@@ -388,30 +322,25 @@ wss.on("connection", (ws, req) => {
   ws.on("error", (e) => log(`WS error: ${e.message}`, "error"));
 });
 
-// ─── 定期ステータスログ ───────────────────────────────────────
+// ─── 定期ステータスログ ────────────────────────────────────────
 setInterval(() => {
   log(`Status: Broadcaster=${broadcasterPeer ? "ON" : "OFF"}, Viewers=${viewerPeers.size}`);
 }, 60000);
 
-// ─── メモリ監視 ───────────────────────────────────────────────
+// ─── メモリ監視 ────────────────────────────────────────────────
 setInterval(() => {
-  const u = process.memoryUsage();
+  const u    = process.memoryUsage();
   const heap = (u.heapUsed / 1024 / 1024).toFixed(1);
-  const total = (u.heapTotal / 1024 / 1024).toFixed(1);
-  log(`Memory: ${heap}MB / ${total}MB`);
-  if (u.heapUsed / u.heapTotal > 0.85 && global.gc) {
-    global.gc();
-    log("GC triggered");
-  }
+  const tot  = (u.heapTotal / 1024 / 1024).toFixed(1);
+  log(`Memory: ${heap}MB / ${tot}MB`);
+  if (u.heapUsed / u.heapTotal > 0.85 && global.gc) { global.gc(); log("GC triggered"); }
 }, 300000);
 
-// ─── サーバー起動 ─────────────────────────────────────────────
+// ─── サーバー起動 ──────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  log(`SFU Server running on port ${PORT}`, "success");
-});
+server.listen(PORT, () => log(`SFU Server running on port ${PORT}`, "success"));
 
-// ─── Graceful shutdown ────────────────────────────────────────
+// ─── Graceful shutdown ─────────────────────────────────────────
 const shutdown = () => {
   log("Shutting down...");
   notifyAllViewers({ type: "broadcasterDisconnected", permanent: true });
@@ -421,6 +350,6 @@ const shutdown = () => {
   setTimeout(() => process.exit(1), 10000);
 };
 process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-process.on("uncaughtException", (e) => log(`Uncaught: ${e.message}\n${e.stack}`, "error"));
+process.on("SIGINT",  shutdown);
+process.on("uncaughtException",  (e) => log(`Uncaught: ${e.message}\n${e.stack}`, "error"));
 process.on("unhandledRejection", (r) => log(`UnhandledRejection: ${r}`, "error"));
